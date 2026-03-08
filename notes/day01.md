@@ -579,7 +579,7 @@ Test ABC Student G 95 0.875 1.000
 
 Window offset functions include two categories of functions. One category contains functions whose offset is relative to the current row, including the LAG and LEAD functions. Another category contains functions whose offset is relative to the start or end of the window frame, including the functions FIRST_VALUE, LAST_VALUE, and NTH_VALUE.
 
-```sql 
+```sql
 SELECT custid, orderdate, orderid, val,
 FIRST_VALUE(val) OVER(PARTITION BY custid
 ORDER BY orderdate, orderid
