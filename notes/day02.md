@@ -13,3 +13,32 @@ Each leaf node is stored in a database block or page; that is, the database’s 
 ![Leaf Nodes](../screenshots/5.png)
 
 ![Leaf Nodes](../screenshots/6.png)
+
+There are still cases where an index lookup doesn’t work as fast as expected. 
+
+The first ingredient for a slow index lookup is the leaf node chain. Consider the search for “57” in Figure above again. There are obviously two matching entries in the index. At least two entries are the same, to be more precise: the next leaf node could have further entries for “57”. The database must read the next leaf node to see if there are any more matching entries. That means that an index lookup not only needs to perform the tree traversal, it also needs to follow the leaf node chain.
+
+The second ingredient for a slow index lookup is accessing the table. Even a single leaf node might contain many hits—often hundreds. The corresponding table data is usually scattered across many table blocks (see Figure 1.1, “Index Leaf Nodes and Corresponding Table Data”). That means that there is an additional table access for each hit.
+
+An index lookup requires three steps: (1) the tree traversal; (2) following the
+leaf node chain; (3) fetching the table data. The tree traversal is the only
+step that has an upper bound for the number of accessed blocks—the index
+depth. The other two steps might need to access many blocks—they cause
+a slow index lookup.
+
+The INDEX UNIQUE SCAN performs the tree traversal only. The Oracle
+database uses this operation if a unique constraint ensures that the
+search criteria will match no more than one entry.
+
+The INDEX RANGE SCAN performs the tree traversal and follows the leaf
+node chain to find all matching entries. This is the fallback operation
+if multiple entries could possibly match the search criteria.
+
+The TABLE ACCESS BY INDEX ROWID operation retrieves the row from
+the table. This operation is (often) performed for every matched record
+from a preceding index scan operation.
+
+The important point is that an INDEX RANGE SCAN can potentially read a large
+part of an index. If there is one more table access for each row, the query
+can become slow even when using an index.
+
