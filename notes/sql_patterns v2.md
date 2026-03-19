@@ -1,5 +1,5 @@
 # SQL Patterns — Complete Reference
-## For: Sachin Ram | Goal: Data Engineer 15–18 LPA | Built for interviews + production thinking
+## For: Sachin Ram | Goal: Data Engineer | Built for interviews + production thinking
 
 ---
 

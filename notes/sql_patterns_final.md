@@ -1,5 +1,5 @@
 # SQL Patterns — Complete Reference
-### Sachin Ram | Oracle/PL/SQL → Data Engineer 15–18 LPA
+### Sachin Ram | Oracle/PL/SQL → Data Engineer
 ### Use for: learning, DataLemur, StrataScratch, NamasteSql, LeetCode, light book reference
 
 ---
