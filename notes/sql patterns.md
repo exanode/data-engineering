@@ -1446,3 +1446,1975 @@ It is about mastering a small set of reusable ideas:
 Once you can recognize those shapes, “tricky” SQL stops feeling magical.
 
 For your transition into data engineering, this is high ROI because your roadmap and guide both make clear that SQL is tested everywhere, and that these exact window-function and hard analytics patterns are central to success in your target band.
+
+
+--- 
+
+# Advanced SQL: the Missing Pieces 
+
+## What these missing topics really are
+
+These are not random extras.
+
+They are the pieces that make an interviewer feel:
+
+> “This person does not just know SQL syntax. They understand how SQL behaves, why queries go wrong, and how to write production-safe SQL.”
+
+That is the jump from:
+
+* “can solve SQL problems”
+  to
+* “can own warehouse logic and debug pipelines”
+
+These missing areas mostly fall into 5 buckets:
+
+1. **How SQL actually executes**
+2. **How to choose the right pattern**
+3. **How NULLs and joins silently break correctness**
+4. **How large-table SQL behaves in real data systems**
+5. **How to think like a data engineer, not just a query writer**
+
+---
+
+# 1) SQL Execution Order + Why `QUALIFY` Exists
+
+## Intuition
+
+A lot of SQL confusion comes from this:
+
+You write SQL **top to bottom**, but the database does **not execute it top to bottom**.
+
+This matters because many interview traps are really about execution order:
+
+* “Why can’t I use `ROW_NUMBER()` in `WHERE`?”
+* “Why do I need a subquery?”
+* “Why does `QUALIFY` help?”
+
+If you deeply understand execution order, many advanced SQL problems become much easier.
+
+---
+
+## The practical execution order
+
+A useful mental model is:
+
+```sql
+FROM / JOIN
+WHERE
+GROUP BY
+HAVING
+WINDOW FUNCTIONS
+SELECT
+DISTINCT
+ORDER BY
+LIMIT
+```
+
+Different engines may describe internal planning differently, but for interview and writing purposes, this order is the right mental model.
+
+### Key idea
+
+Window functions are computed **after** `WHERE` and `GROUP BY`, but **before final ordering/output**.
+
+That is why this fails:
+
+```sql
+SELECT
+  customer_id,
+  order_id,
+  ROW_NUMBER() OVER (
+    PARTITION BY customer_id
+    ORDER BY order_time DESC
+  ) AS rn
+FROM orders
+WHERE rn = 1;
+```
+
+Because at the `WHERE` stage, `rn` does not exist yet.
+
+---
+
+## The classic fix: subquery / CTE
+
+```sql
+WITH ranked AS (
+  SELECT
+    customer_id,
+    order_id,
+    order_time,
+    ROW_NUMBER() OVER (
+      PARTITION BY customer_id
+      ORDER BY order_time DESC
+    ) AS rn
+  FROM orders
+)
+SELECT *
+FROM ranked
+WHERE rn = 1;
+```
+
+### How to think about it
+
+Break the problem into stages:
+
+1. build rows
+2. compute row numbers
+3. filter on row numbers
+
+This “layered CTE thinking” is one of the most important advanced SQL habits.
+
+---
+
+## `QUALIFY`: the modern shortcut
+
+Some databases like Snowflake and BigQuery support `QUALIFY`, which lets you filter **after window functions** without needing a subquery. Your roadmap explicitly calls out `QUALIFY` in Snowflake. 
+
+```sql
+SELECT
+  customer_id,
+  order_id,
+  order_time
+FROM orders
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY customer_id
+  ORDER BY order_time DESC
+) = 1;
+```
+
+### Why it exists
+
+Because filtering windowed results is such a common pattern that subqueries become noisy.
+
+### Where it is used
+
+* latest row per key
+* top N per group
+* dedup
+* first event after condition
+* keeping one row after ranking
+
+---
+
+## Interview angle
+
+### Typical question
+
+“Return the latest order per customer.”
+
+### Good answer
+
+* portable SQL: use CTE/subquery + `ROW_NUMBER`
+* Snowflake/BigQuery: use `QUALIFY`
+
+### What interviewer is testing
+
+Not just syntax. They are testing whether you understand:
+
+* ranking
+* ordering
+* filtering stage
+* dialect-aware simplification
+
+---
+
+## Example with sample table
+
+### `orders`
+
+| customer_id | order_id | order_time          |
+| ----------- | -------- | ------------------- |
+| 1           | 101      | 2025-01-01 10:00:00 |
+| 1           | 102      | 2025-01-03 09:00:00 |
+| 2           | 201      | 2025-01-02 11:00:00 |
+| 2           | 202      | 2025-01-02 12:00:00 |
+
+### Query
+
+```sql
+SELECT
+  customer_id,
+  order_id,
+  order_time
+FROM orders
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY customer_id
+  ORDER BY order_time DESC
+) = 1;
+```
+
+### Output
+
+| customer_id | order_id | order_time          |
+| ----------- | -------- | ------------------- |
+| 1           | 102      | 2025-01-03 09:00:00 |
+| 2           | 202      | 2025-01-02 12:00:00 |
+
+---
+
+## Common mistakes
+
+### Mistake 1: trying to use window output in `WHERE`
+
+Wrong mental model.
+
+### Mistake 2: forgetting tie-breakers
+
+If two rows have same timestamp, result may be nondeterministic.
+
+Better:
+
+```sql
+ORDER BY order_time DESC, order_id DESC
+```
+
+### Mistake 3: assuming `QUALIFY` is universal
+
+It is not portable to all engines.
+
+---
+
+## Reusable mental model
+
+When you see:
+
+* latest row
+* first row
+* top N per group
+* dedup
+
+Think:
+
+> “I need to rank first, then filter after ranking.”
+
+If dialect supports `QUALIFY`, use it.
+Otherwise, use a CTE/subquery.
+
+---
+
+# 2) Choosing Between `DISTINCT`, `GROUP BY`, and Window Functions
+
+## Intuition
+
+Many people know all three, but do not know **which one matches the problem shape**.
+
+This is a very common interview differentiator.
+
+Because often the wrong SQL still runs — but it solves the wrong problem.
+
+---
+
+## The core difference
+
+### `DISTINCT`
+
+Use when you just want to remove duplicate rows from the final output.
+
+### `GROUP BY`
+
+Use when you want to **collapse rows into fewer rows** and aggregate.
+
+### Window functions
+
+Use when you want to **keep original rows** but compute group-level or sequence-level information.
+
+That is the whole decision.
+
+---
+
+## Mental model
+
+Ask:
+
+### 1. Do I want fewer rows?
+
+Use `GROUP BY`.
+
+### 2. Do I want the same number of rows, plus extra metrics?
+
+Use window functions.
+
+### 3. Do I just want duplicate output rows removed, without business logic?
+
+Use `DISTINCT`.
+
+---
+
+## Example 1: `DISTINCT`
+
+### Table `events`
+
+| user_id | page |
+| ------- | ---- |
+| 1       | home |
+| 1       | home |
+| 1       | cart |
+| 2       | home |
+
+```sql
+SELECT DISTINCT user_id, page
+FROM events;
+```
+
+### Output
+
+| user_id | page |
+| ------- | ---- |
+| 1       | home |
+| 1       | cart |
+| 2       | home |
+
+### What happened
+
+You did not compute anything.
+You only removed duplicate output rows.
+
+---
+
+## Example 2: `GROUP BY`
+
+Suppose you want page counts per user.
+
+```sql
+SELECT
+  user_id,
+  COUNT(*) AS page_views
+FROM events
+GROUP BY user_id;
+```
+
+### Output
+
+| user_id | page_views |
+| ------- | ---------- |
+| 1       | 3          |
+| 2       | 1          |
+
+### What happened
+
+You collapsed multiple event rows into one row per user.
+
+---
+
+## Example 3: window function
+
+Suppose you want each row plus total page views for that user.
+
+```sql
+SELECT
+  user_id,
+  page,
+  COUNT(*) OVER (PARTITION BY user_id) AS user_page_views
+FROM events;
+```
+
+### Output
+
+| user_id | page | user_page_views |
+| ------- | ---- | --------------- |
+| 1       | home | 3               |
+| 1       | home | 3               |
+| 1       | cart | 3               |
+| 2       | home | 1               |
+
+### What happened
+
+You kept all rows, but attached group-level info to each row.
+
+---
+
+## Common interview trap
+
+“Why not use `GROUP BY` here?”
+
+### Example
+
+Return each employee row along with department average salary.
+
+Bad approach:
+
+```sql
+SELECT dept, AVG(salary)
+FROM employees
+GROUP BY dept;
+```
+
+This loses employee rows.
+
+Correct:
+
+```sql
+SELECT
+  emp_id,
+  dept,
+  salary,
+  AVG(salary) OVER (PARTITION BY dept) AS dept_avg_salary
+FROM employees;
+```
+
+---
+
+## Real-world DE use cases
+
+### `DISTINCT`
+
+* cleaning obvious duplicate outputs
+* deduping staging data only in simple cases
+
+### `GROUP BY`
+
+* building daily aggregates
+* fact table summarization
+* KPI reporting
+
+### window functions
+
+* customer-level stats on event rows
+* ranking latest records
+* running totals
+* comparing rows across time
+
+---
+
+## Common mistakes
+
+### Mistake 1: using `DISTINCT` to hide join problems
+
+This is dangerous.
+
+People often do:
+
+```sql
+SELECT DISTINCT ...
+FROM a
+JOIN b ...
+```
+
+because duplicates appeared after a bad join.
+
+That is not a fix. That is hiding a grain/cardinality bug.
+
+### Mistake 2: using `GROUP BY` when row preservation is needed
+
+You lose row-level detail.
+
+### Mistake 3: using windows when aggregation is enough
+
+Sometimes you actually want a summary table, not row-level output.
+
+---
+
+## Reusable mental model
+
+Ask this exact question in your head:
+
+> “Should the result have fewer rows, same rows, or just unique rows?”
+
+* fewer rows → `GROUP BY`
+* same rows → window
+* unique rows only → `DISTINCT`
+
+---
+
+# 3) NULL Semantics: the Silent Source of Wrong SQL
+
+## Intuition
+
+NULL is not a value like 0 or empty string.
+
+NULL means:
+
+> “unknown” or “missing”
+
+Because of that, SQL comparisons involving NULL behave differently than most people expect.
+
+This is one of the highest-ROI topics for interviews because many “mystery bugs” are really NULL bugs.
+
+Your notes mention null semantics, but for interview readiness this topic deserves its own deep treatment. 
+
+---
+
+## The first rule: `NULL = NULL` is not true
+
+It is not true.
+It is not false.
+It is unknown.
+
+So this does not work:
+
+```sql
+WHERE col = NULL
+```
+
+Correct:
+
+```sql
+WHERE col IS NULL
+```
+
+And:
+
+```sql
+WHERE col IS NOT NULL
+```
+
+---
+
+## Three-valued logic
+
+SQL uses:
+
+* TRUE
+* FALSE
+* UNKNOWN
+
+Rows pass a `WHERE` filter only when condition is TRUE.
+
+So if a condition becomes UNKNOWN, the row is filtered out.
+
+That explains a lot of weird behavior.
+
+---
+
+## Example
+
+### Table `users`
+
+| user_id | country |
+| ------- | ------- |
+| 1       | IN      |
+| 2       | NULL    |
+| 3       | US      |
+
+### Query
+
+```sql
+SELECT *
+FROM users
+WHERE country <> 'IN';
+```
+
+You might expect rows 2 and 3.
+Actual result: only row 3.
+
+Why?
+
+* row 1: `'IN' <> 'IN'` → FALSE
+* row 2: `NULL <> 'IN'` → UNKNOWN
+* row 3: `'US' <> 'IN'` → TRUE
+
+Only TRUE survives.
+
+---
+
+## `COUNT(*)` vs `COUNT(col)`
+
+This is a classic interview question.
+
+### Table `payments`
+
+| payment_id | amount |
+| ---------- | ------ |
+| 1          | 100    |
+| 2          | NULL   |
+| 3          | 50     |
+
+```sql
+SELECT
+  COUNT(*) AS total_rows,
+  COUNT(amount) AS non_null_amount_rows
+FROM payments;
+```
+
+### Output
+
+| total_rows | non_null_amount_rows |
+| ---------- | -------------------- |
+| 3          | 2                    |
+
+### Why
+
+* `COUNT(*)` counts rows
+* `COUNT(col)` counts non-null values in that column
+
+---
+
+## `SUM`, `AVG`, `MIN`, `MAX`
+
+These ignore NULLs in most SQL engines.
+
+```sql
+SELECT AVG(amount)
+FROM payments;
+```
+
+This averages only 100 and 50, not the NULL row.
+
+---
+
+## Safer comparison: `IS DISTINCT FROM`
+
+In some engines like Postgres, this is extremely useful.
+
+```sql
+SELECT *
+FROM t
+WHERE col1 IS DISTINCT FROM col2;
+```
+
+This treats NULLs more intuitively for change detection:
+
+* NULL vs NULL → not distinct
+* NULL vs 5 → distinct
+* 5 vs 5 → not distinct
+
+This is much safer than `<>` in many DE scenarios.
+
+Your notes already hint at this for `LAG` comparisons, but you should generalize the idea. 
+
+---
+
+## Real-world DE use cases
+
+* CDC comparison between source and target
+* null-safe change detection
+* reconciliation queries
+* quality checks on required fields
+* join debugging
+
+---
+
+## Common mistakes
+
+### Mistake 1: `= NULL`
+
+Always wrong.
+
+### Mistake 2: assuming `NULL <> value` is TRUE
+
+It is UNKNOWN.
+
+### Mistake 3: forgetting NULL behavior inside joins
+
+More on that next.
+
+---
+
+## Reusable mental model
+
+Whenever NULL is involved, ask:
+
+> “Is this value missing? Then comparison may become UNKNOWN.”
+
+And whenever comparing fields for equality/inequality in change detection, ask:
+
+> “Do I need null-safe comparison?”
+
+---
+
+# 4) Anti-Joins Properly: `NOT EXISTS` vs `LEFT JOIN ... IS NULL` vs `NOT IN`
+
+## Intuition
+
+An anti-join means:
+
+> “Give me rows from A that do **not** have a match in B.”
+
+This pattern shows up constantly in data engineering:
+
+* records in source not yet loaded
+* customers with no orders
+* target rows no longer present in source
+* missing mappings
+* reconciliation failures
+
+Your notes cover anti-join at the pattern level. What was still missing was the **deep correctness discussion**, especially `NOT IN` and NULLs. 
+
+---
+
+## Pattern 1: `NOT EXISTS` — safest mental model
+
+```sql
+SELECT c.customer_id
+FROM customers c
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM orders o
+  WHERE o.customer_id = c.customer_id
+);
+```
+
+### How to think about it
+
+For each customer, ask:
+“Does at least one matching order exist?”
+If no, keep the customer.
+
+This expresses intent very clearly.
+
+---
+
+## Pattern 2: `LEFT JOIN ... IS NULL`
+
+```sql
+SELECT c.customer_id
+FROM customers c
+LEFT JOIN orders o
+  ON c.customer_id = o.customer_id
+WHERE o.customer_id IS NULL;
+```
+
+### How to think about it
+
+Left join keeps all customers.
+If no matching order exists, order columns are NULL.
+So filtering `o.customer_id IS NULL` keeps only unmatched customers.
+
+---
+
+## Pattern 3: `NOT IN` — dangerous when NULLs exist
+
+```sql
+SELECT customer_id
+FROM customers
+WHERE customer_id NOT IN (
+  SELECT customer_id
+  FROM orders
+);
+```
+
+This looks fine.
+But if `orders.customer_id` contains even one NULL, the logic can break.
+
+---
+
+## Why `NOT IN` breaks
+
+Suppose `orders.customer_id` is:
+
+| customer_id |
+| ----------- |
+| 1           |
+| 2           |
+| NULL        |
+
+Now SQL effectively evaluates:
+
+```sql
+customer_id NOT IN (1, 2, NULL)
+```
+
+For customer 3, that becomes something like:
+
+* 3 <> 1 → TRUE
+* 3 <> 2 → TRUE
+* 3 <> NULL → UNKNOWN
+
+Combined result becomes UNKNOWN, so row is filtered out.
+
+This can make the query return **no rows**, which shocks many candidates.
+
+---
+
+## Safe version if you must use `NOT IN`
+
+```sql
+SELECT customer_id
+FROM customers
+WHERE customer_id NOT IN (
+  SELECT customer_id
+  FROM orders
+  WHERE customer_id IS NOT NULL
+);
+```
+
+But in interviews, `NOT EXISTS` is usually the better answer.
+
+---
+
+## Which one should you prefer?
+
+### Prefer `NOT EXISTS` when:
+
+* you want the cleanest semantic meaning
+* nullable keys exist
+* you want safer interview-grade correctness
+
+### Use `LEFT JOIN ... IS NULL` when:
+
+* it reads naturally in a broader join pipeline
+* you also need columns from the left side in a join-style query
+
+### Be careful with `NOT IN`
+
+Only use when you are very sure the subquery column cannot contain NULLs.
+
+---
+
+## Step-by-step example
+
+### `customers`
+
+| customer_id |
+| ----------- |
+| 1           |
+| 2           |
+| 3           |
+| 4           |
+
+### `orders`
+
+| order_id | customer_id |
+| -------- | ----------- |
+| 101      | 1           |
+| 102      | 1           |
+| 103      | 2           |
+
+### Query
+
+```sql
+SELECT c.customer_id
+FROM customers c
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM orders o
+  WHERE o.customer_id = c.customer_id
+);
+```
+
+### Output
+
+| customer_id |
+| ----------- |
+| 3           |
+| 4           |
+
+---
+
+## Interview question
+
+“Find employees not assigned to a department.”
+
+### Strong verbal answer
+
+“I would usually write this as `NOT EXISTS` because anti-join is really an existence check, and `NOT EXISTS` is robust even when nullable data is involved. `LEFT JOIN ... IS NULL` is also valid, but I avoid `NOT IN` unless I know the subquery cannot return NULLs.”
+
+---
+
+# 5) Correlated Subqueries vs Window Functions
+
+## Intuition
+
+A correlated subquery is a subquery that depends on the current row of the outer query.
+
+It is not always wrong.
+But many advanced SQL problems that juniors solve with correlated subqueries are cleaner and more scalable with window functions.
+
+Interviewers love this comparison because it reveals whether you think in **row-by-row logic** or **set-based logic**.
+
+---
+
+## Correlated subquery example
+
+### Problem
+
+Find employees whose salary is above their department average.
+
+### Query
+
+```sql
+SELECT
+  e.emp_id,
+  e.dept,
+  e.salary
+FROM employees e
+WHERE e.salary > (
+  SELECT AVG(e2.salary)
+  FROM employees e2
+  WHERE e2.dept = e.dept
+);
+```
+
+### Why it works
+
+For each employee row, the subquery recomputes average salary for that row’s department.
+
+Conceptually correct.
+
+---
+
+## Window version
+
+```sql
+WITH x AS (
+  SELECT
+    emp_id,
+    dept,
+    salary,
+    AVG(salary) OVER (PARTITION BY dept) AS dept_avg_salary
+  FROM employees
+)
+SELECT
+  emp_id,
+  dept,
+  salary
+FROM x
+WHERE salary > dept_avg_salary;
+```
+
+### Why this is often better
+
+You compute department average once as a window metric on the rowset, then filter.
+
+This is often:
+
+* clearer
+* more extensible
+* better for layered analytics
+
+---
+
+## How to think about it
+
+### Correlated subquery mindset
+
+“For this row, look up something about related rows.”
+
+### Window mindset
+
+“Bring group-level context onto each row, then compare.”
+
+For analytic SQL, window thinking is usually stronger.
+
+---
+
+## Another example: latest row per user
+
+A correlated-subquery way:
+
+```sql
+SELECT o.*
+FROM orders o
+WHERE o.order_time = (
+  SELECT MAX(o2.order_time)
+  FROM orders o2
+  WHERE o2.customer_id = o.customer_id
+);
+```
+
+This may return multiple rows on ties.
+
+Window version:
+
+```sql
+SELECT *
+FROM orders
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY customer_id
+  ORDER BY order_time DESC, order_id DESC
+) = 1;
+```
+
+This gives deterministic one-row-per-customer logic.
+
+---
+
+## Real-world DE use cases
+
+* latest status per entity
+* comparing values to group avg/max/min
+* identifying first/last events
+* ranking rows for dedup and CDC cleanup
+
+---
+
+## Common mistakes
+
+### Mistake 1: using correlated subquery when ties matter
+
+You may get multiple rows unintentionally.
+
+### Mistake 2: thinking correlated subquery is always bad
+
+It is not. Sometimes it is readable and optimizer handles it well.
+
+### Mistake 3: not recognizing window functions as the analytic upgrade
+
+For grouped row-wise comparisons, windows are often the right abstraction.
+
+---
+
+## Reusable mental model
+
+If the problem says:
+
+* compare row to group metric
+* rank within group
+* attach prior/next/group context to each row
+
+Think:
+
+> “This smells like a window function.”
+
+---
+
+# 6) Join Explosion, Cardinality, and Grain Control
+
+## Intuition
+
+This is one of the most important real-world DE skills.
+
+Many SQL answers are “correct” syntactically but wrong analytically because joins changed the grain of the data.
+
+This is what causes:
+
+* inflated revenue
+* duplicate users
+* wrong counts
+* broken dashboards
+* expensive queries
+
+Your notes cover fan-out detection, but what was still missing was a deeper **cardinality mental model**.  
+
+---
+
+## The most important question before a join
+
+Ask:
+
+> “What is the grain of each table?”
+> and
+> “What cardinality will this join create?”
+
+---
+
+## Cardinality types
+
+### one-to-one
+
+One row in A matches one row in B.
+
+### one-to-many
+
+One row in A matches many rows in B.
+
+### many-to-one
+
+Many rows in A match one row in B.
+
+### many-to-many
+
+Many rows in A match many rows in B.
+
+This is the danger zone.
+
+---
+
+## Example: join explosion
+
+### `orders`
+
+| order_id | customer_id | order_amount |
+| -------- | ----------- | ------------ |
+| 100      | 1           | 500          |
+| 101      | 1           | 200          |
+
+### `order_items`
+
+| order_id | item_id | item_price |
+| -------- | ------- | ---------- |
+| 100      | A       | 300        |
+| 100      | B       | 200        |
+| 101      | C       | 200        |
+
+Now do:
+
+```sql
+SELECT
+  o.order_id,
+  o.order_amount,
+  oi.item_id
+FROM orders o
+JOIN order_items oi
+  ON o.order_id = oi.order_id;
+```
+
+### Output
+
+| order_id | order_amount | item_id |
+| -------- | ------------ | ------- |
+| 100      | 500          | A       |
+| 100      | 500          | B       |
+| 101      | 200          | C       |
+
+Notice `order_amount=500` is repeated twice.
+
+If you now do:
+
+```sql
+SELECT SUM(o.order_amount)
+FROM orders o
+JOIN order_items oi
+  ON o.order_id = oi.order_id;
+```
+
+You get:
+
+* 500 + 500 + 200 = 1200
+
+But real order revenue is:
+
+* 500 + 200 = 700
+
+This is a classic analytics bug.
+
+---
+
+## Correct ways to think
+
+### If you need order-level totals
+
+Do not join to item-level rows unless necessary.
+
+### If you need item counts per order
+
+Aggregate item table first:
+
+```sql
+WITH item_counts AS (
+  SELECT
+    order_id,
+    COUNT(*) AS item_count
+  FROM order_items
+  GROUP BY order_id
+)
+SELECT
+  o.order_id,
+  o.order_amount,
+  i.item_count
+FROM orders o
+LEFT JOIN item_counts i
+  ON o.order_id = i.order_id;
+```
+
+Now grain stays one row per order.
+
+---
+
+## Cardinality estimation habit
+
+Before joining, ask:
+
+* is the join key unique on left?
+* is the join key unique on right?
+* what will row count likely become?
+
+### Example
+
+* customers: 1M rows, unique by `customer_id`
+* orders: 20M rows, many per customer
+
+Then:
+
+* customer → orders join will expand toward 20M rows, not stay 1M
+
+This sounds obvious, but strong DEs always estimate row count mentally before running the join.
+
+---
+
+## Detection queries
+
+### Check uniqueness
+
+```sql
+SELECT customer_id, COUNT(*)
+FROM customers
+GROUP BY customer_id
+HAVING COUNT(*) > 1;
+```
+
+```sql
+SELECT order_id, COUNT(*)
+FROM order_items
+GROUP BY order_id
+HAVING COUNT(*) > 1;
+```
+
+### Check row counts before and after join
+
+```sql
+SELECT COUNT(*) FROM orders;
+
+SELECT COUNT(*)
+FROM orders o
+JOIN order_items oi
+  ON o.order_id = oi.order_id;
+```
+
+If row count jumps unexpectedly, inspect grain.
+
+---
+
+## Real-world DE use cases
+
+* fact-to-fact joins
+* attribution pipelines
+* clickstream enrichment
+* duplicate metric debugging
+* dimensional model design
+* dbt model validation
+
+---
+
+## Common mistakes
+
+### Mistake 1: using `DISTINCT` to hide fan-out
+
+This can silently corrupt business logic.
+
+### Mistake 2: not defining output grain first
+
+“one row per customer” vs “one row per customer order item” changes everything.
+
+### Mistake 3: joining two fact-like tables directly
+
+Often requires pre-aggregation or careful bridge logic.
+
+---
+
+## Reusable mental model
+
+Before every join, say this to yourself:
+
+> “What is the grain on the left, what is the grain on the right, and what will one joined row represent?”
+
+If you cannot answer that clearly, do not trust the query yet.
+
+---
+
+# 7) Window Frames: Defaults, `ROWS` vs `RANGE`, and Why Ties Matter
+
+## Intuition
+
+Many people can write window functions, but fewer understand the frame.
+
+This matters because:
+
+* running totals may silently behave differently with duplicate order values
+* interviewers may ask “what is the difference between `ROWS` and `RANGE`?”
+* the default frame can surprise you
+
+Your roadmap explicitly expects you to explain `ROWS BETWEEN` vs `RANGE BETWEEN`. 
+
+---
+
+## What is a frame?
+
+Inside a window partition, the frame defines:
+
+> “For this row, which neighboring rows are included in the calculation?”
+
+For example:
+
+* all prior rows up to current row
+* current row only
+* last 7 rows
+* all rows with same order value
+
+---
+
+## The explicit `ROWS` running total
+
+```sql
+SELECT
+  sale_date,
+  amount,
+  SUM(amount) OVER (
+    ORDER BY sale_date
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS running_total
+FROM daily_sales;
+```
+
+This means:
+for each row, sum from first row up to current row by row position.
+
+---
+
+## Why default frame matters
+
+If you write:
+
+```sql
+SUM(amount) OVER (ORDER BY sale_date)
+```
+
+many engines treat this like a default frame, often equivalent to:
+
+```sql
+RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+```
+
+The exact behavior depends on engine and data type support, but interview-wise the key point is:
+
+> default framing may not behave like explicit row-by-row accumulation when ties exist.
+
+So for production clarity, prefer writing the frame explicitly.
+
+---
+
+## `ROWS` vs `RANGE`
+
+### `ROWS`
+
+Counts physical rows.
+
+### `RANGE`
+
+Groups rows by ordered value range, and tied values can be included together.
+
+---
+
+## Example with ties
+
+### `sales`
+
+| day | amount |
+| --- | ------ |
+| 1   | 100    |
+| 1   | 50     |
+| 2   | 30     |
+
+Now compare:
+
+### Query with `ROWS`
+
+```sql
+SELECT
+  day,
+  amount,
+  SUM(amount) OVER (
+    ORDER BY day
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS running_rows
+FROM sales;
+```
+
+### Output idea
+
+| day | amount | running_rows |
+| --- | ------ | ------------ |
+| 1   | 100    | 100          |
+| 1   | 50     | 150          |
+| 2   | 30     | 180          |
+
+Now with `RANGE`:
+
+```sql
+SELECT
+  day,
+  amount,
+  SUM(amount) OVER (
+    ORDER BY day
+    RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS running_range
+FROM sales;
+```
+
+### Output idea
+
+For the first `day = 1` row, `RANGE` may include **all rows where day = 1**, so the result can jump straight to 150 even on the first tied row.
+
+That is why `RANGE` can surprise you.
+
+---
+
+## Practical rule
+
+For most interview and DE operational SQL:
+
+> default to `ROWS`
+
+Use `RANGE` only when you explicitly want value-based grouping behavior.
+
+Your notes mention this briefly; what you needed was the deeper intuition about ties and default frames. 
+
+---
+
+## Common mistakes
+
+### Mistake 1: omitting frame and assuming behavior
+
+Be explicit.
+
+### Mistake 2: using `RANGE` accidentally on tied order values
+
+Running totals jump unexpectedly.
+
+### Mistake 3: not having deterministic ordering
+
+If timestamps tie, add a second tie-breaker when using row-based logic.
+
+---
+
+## Interview-quality explanation
+
+“If I want running totals row by row, I prefer `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` because it behaves on physical row positions. `RANGE` is value-based and can pull in tied rows that share the same order key, so results can differ when duplicates exist.”
+
+---
+
+# 8) Incremental Processing Strategy: Full Refresh vs Incremental vs Idempotency
+
+## Intuition
+
+This is where SQL becomes data engineering.
+
+A strong DE interview is not only:
+“Can you write a query?”
+
+It is also:
+“How would you run this every day safely?”
+
+Your notes cover `MERGE` and SCD2 mechanics, but the missing layer was the **strategy behind incremental processing**. 
+
+---
+
+## Why incremental processing exists
+
+If a table has 5 billion rows, you do not want to recompute everything every day unless necessary.
+
+So you often process:
+
+* only new rows
+* only changed rows
+* only recent partitions
+
+This reduces:
+
+* runtime
+* cost
+* failure surface
+
+---
+
+## Three core strategies
+
+### 1. Full refresh
+
+Rebuild the entire target every run.
+
+Good when:
+
+* data is small
+* logic is simple
+* correctness matters more than cost
+* early model stage
+
+Bad when:
+
+* data is huge
+* SLA is tight
+
+---
+
+### 2. Incremental append
+
+Load only newly arrived rows.
+
+Example:
+
+```sql
+SELECT *
+FROM source_events
+WHERE event_time > (
+  SELECT MAX(event_time)
+  FROM target_events
+);
+```
+
+This is simple but has edge cases.
+
+---
+
+### 3. Incremental upsert / merge
+
+Insert new rows and update changed rows.
+
+```sql
+MERGE INTO target t
+USING source_delta s
+ON t.id = s.id
+WHEN MATCHED AND t.hash_val <> s.hash_val THEN
+  UPDATE SET ...
+WHEN NOT MATCHED THEN
+  INSERT (...);
+```
+
+This is common for dimensions, latest-state tables, and CDC-style pipelines.
+
+---
+
+## Watermarking
+
+A watermark is the “how far have I processed?” marker.
+
+Typical examples:
+
+* max `updated_at`
+* max `ingestion_id`
+* max event date processed
+
+### Example
+
+```sql
+SELECT *
+FROM source_orders
+WHERE updated_at > :last_watermark;
+```
+
+---
+
+## Why watermarks are tricky
+
+Suppose yesterday you processed up to:
+`2025-01-10 10:00:00`
+
+Today, a late record arrives with:
+`2025-01-10 09:55:00`
+
+If you strictly use `>` watermark, you miss it.
+
+So many pipelines use a lookback window:
+
+```sql
+SELECT *
+FROM source_orders
+WHERE updated_at >= :last_watermark - INTERVAL '1 day';
+```
+
+Then deduplicate downstream.
+
+---
+
+## Idempotency
+
+Idempotency means:
+
+> running the same pipeline again should not create incorrect duplicates or inconsistent results.
+
+This is a core DE principle.
+
+### Example of non-idempotent load
+
+```sql
+INSERT INTO target_orders
+SELECT *
+FROM source_orders
+WHERE order_date = CURRENT_DATE;
+```
+
+If the job reruns, same rows get inserted again.
+
+### Better approach
+
+* use `MERGE`
+* use unique keys
+* dedup in staging
+* overwrite target partition safely
+
+---
+
+## Late-arriving data
+
+This is extremely common in real systems:
+
+* mobile devices sync late
+* APIs retry late
+* upstream batch arrives late
+
+So incremental design must answer:
+
+> “If a record arrives late, how do we still include it?”
+
+Typical fixes:
+
+* lookback windows
+* event-time vs ingestion-time logic
+* dedup by business key + latest timestamp
+* periodic backfill
+
+---
+
+## Real-world DE use cases
+
+* dbt incremental models
+* CDC ingestion
+* bronze → silver pipelines
+* daily warehouse loads
+* snapshot repair and reconciliation
+
+Your roadmap’s dbt section will connect directly with this mindset, because dbt incremental models are really this exact strategy layer expressed declaratively. 
+
+---
+
+## Common interview questions
+
+* full refresh vs incremental: when would you choose each?
+* how do you handle late-arriving data?
+* how do you make an incremental load idempotent?
+* why is watermark-only loading risky?
+
+---
+
+## Strong mental model
+
+When you design a recurring SQL pipeline, ask:
+
+1. what identifies a row uniquely?
+2. what marks new or changed data?
+3. can data arrive late?
+4. if the job reruns, will I duplicate data?
+5. when should I rebuild fully instead?
+
+That is data engineering thinking.
+
+---
+
+# 9) Partition Pruning, Clustering, and Warehouse-Aware SQL
+
+## Intuition
+
+In OLTP thinking, people often think:
+“Use an index.”
+
+In modern cloud warehouses, the thinking is more like:
+
+* prune partitions / micro-partitions
+* scan fewer files/blocks
+* align filters with storage layout
+
+Your optimization notes already introduce sargability and pruning. The missing part was the deeper interview framing around **partitioning and clustering strategy**.  
+
+---
+
+## Partition pruning
+
+Partition pruning means the engine can skip scanning irrelevant chunks of data.
+
+### Example
+
+If a table is partitioned by `order_date`, this is good:
+
+```sql
+SELECT *
+FROM sales
+WHERE order_date >= DATE '2025-01-01'
+  AND order_date < DATE '2025-02-01';
+```
+
+Why?
+Because engine can read only January partitions.
+
+---
+
+## Bad version
+
+```sql
+SELECT *
+FROM sales
+WHERE YEAR(order_date) = 2025;
+```
+
+Now the engine may need to inspect far more data because you wrapped the column in a function.
+
+This idea already exists in your optimization notes; what you needed was to link it explicitly to warehouse storage behavior and partition pruning. 
+
+---
+
+## Clustering / sort keys
+
+Different warehouses use different terms:
+
+* Snowflake: clustering keys
+* Redshift: sort keys
+* BigQuery: clustering + partitioning
+
+The core idea is similar:
+
+> organize physical storage so common filters and joins scan less data.
+
+---
+
+## Example thinking
+
+If your largest table is frequently filtered by:
+
+* `event_date`
+* `customer_id`
+
+Then those are strong candidates for partition/clustering design, depending on warehouse.
+
+---
+
+## Why this matters in interviews
+
+If asked:
+“How would you optimize a slow query on a huge fact table?”
+
+A strong answer includes both:
+
+* SQL rewrite
+* storage/layout awareness
+
+Example:
+
+* filter early
+* project only needed columns
+* avoid functions on filter columns
+* align filters with partition keys
+* consider clustering/sort design for common predicates
+
+---
+
+## Common mistakes
+
+### Mistake 1: thinking SQL text alone is enough
+
+Sometimes performance depends on table design.
+
+### Mistake 2: applying functions to partition key
+
+Kills pruning.
+
+### Mistake 3: selecting all columns
+
+Columnar systems charge you for columns scanned too.
+
+---
+
+## Reusable mental model
+
+Ask:
+
+> “Can the engine skip most of the data, or am I forcing it to scan everything?”
+
+That is the heart of warehouse optimization.
+
+---
+
+# 10) A Better “How to Think” Framework for Advanced SQL Interviews
+
+This is not one syntax topic. It is the missing **meta-skill**.
+
+Your notes already have good pattern thinking. What I want to add is the version that works especially well in interviews and production debugging.
+
+---
+
+## The 7-step mental checklist
+
+When given any advanced SQL problem, think in this order:
+
+### Step 1: Define the grain
+
+What does one input row represent?
+
+### Step 2: Define the output grain
+
+What should one output row represent?
+
+### Step 3: Identify the entity key
+
+Per user? Per order? Per department?
+
+### Step 4: Ask whether row order matters
+
+Do I need ranking, prior row, running logic, session boundaries?
+
+### Step 5: Estimate join cardinality
+
+Will this join keep rows stable or multiply them?
+
+### Step 6: Think about NULL behavior
+
+Could NULL break join, filter, comparison, anti-join, or count?
+
+### Step 7: Choose the right tool
+
+* `GROUP BY`
+* window
+* anti-join
+* set difference
+* `MERGE`
+* incremental filter
+* pre-aggregation before join
+
+This is how strong candidates stay calm.
+
+---
+
+# What to Memorize vs What to Understand
+
+## Must memorize
+
+These are worth being able to say/write from memory:
+
+* window execution cannot be filtered in `WHERE`
+* `QUALIFY` filters after window functions
+* `COUNT(*)` vs `COUNT(col)`
+* `NULL = NULL` is not true; use `IS NULL`
+* `NOT EXISTS` is safer than `NOT IN` when NULLs may exist
+* `ROWS` vs `RANGE`: `ROWS` is row-based, `RANGE` is value-based
+* before joins, define grain and cardinality
+* incremental pipelines need idempotency
+* functions on partition/filter columns hurt pruning
+
+---
+
+## Must understand deeply
+
+These should be concept-level, not rote syntax:
+
+* why SQL execution order causes window filtering issues
+* why `DISTINCT` is not a fix for a bad join
+* how fan-out inflates metrics
+* why NULL creates UNKNOWN, not FALSE
+* why late-arriving data breaks naive watermark logic
+* why warehouse performance depends on both query and storage layout
+* why window functions are often better than correlated subqueries for analytics
+
+---
+
+# Interview-Quality Answer You Can Say Verbally
+
+Here is a polished answer you can actually use:
+
+> “For advanced SQL problems, I first define the grain of the input and the required grain of the output, because most mistakes come from grain mismatch or join fan-out. Then I check whether the problem is aggregation, row preservation with window functions, or a set/existence problem like an anti-join. I’m also careful about NULL semantics, because `NOT IN`, joins, and comparisons can silently behave differently when NULLs are present. For ranking and latest-row problems, I usually use `ROW_NUMBER`, then filter either with a CTE or `QUALIFY` in Snowflake. In production data engineering, I also think about incremental loading, idempotency, partition pruning, and whether my joins will multiply rows or scan too much data.”
+
+That is a strong 15–18 LPA style answer.
+
+---
+
+# Practice Problems: Only on the Missing Areas
+
+## 1. Easy
+
+Given `employees(emp_id, dept, salary)`, return each employee row along with department average salary.
+
+Use a window function, not `GROUP BY`.
+
+---
+
+## 2. Easy-Medium
+
+Why does this query fail, and how do you fix it?
+
+```sql
+SELECT *,
+       ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_time DESC) AS rn
+FROM orders
+WHERE rn = 1;
+```
+
+Write both:
+
+* portable fix
+* Snowflake fix with `QUALIFY`
+
+---
+
+## 3. Medium
+
+Given `customers(customer_id)` and `orders(order_id, customer_id)`, return customers with no orders using:
+
+* `NOT EXISTS`
+* `LEFT JOIN ... IS NULL`
+
+Then explain which one you prefer and why.
+
+---
+
+## 4. Medium
+
+Show with a small example why `NOT IN` can return wrong results when the subquery contains NULL.
+
+Then rewrite it safely.
+
+---
+
+## 5. Medium-Hard
+
+Given `sales(day, amount)` with duplicate `day` values, demonstrate the difference between:
+
+```sql
+SUM(amount) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+```
+
+and
+
+```sql
+SUM(amount) OVER (ORDER BY day RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+```
+
+Explain the tie behavior.
+
+---
+
+## 6. Hard
+
+Given `orders(order_id, customer_id, order_amount)` and `order_items(order_id, item_id)`, show how a naive join inflates total order revenue. Then fix it.
+
+---
+
+## 7. Hard
+
+Rewrite this correlated-subquery solution using a window function:
+
+```sql
+SELECT e.*
+FROM employees e
+WHERE salary > (
+  SELECT AVG(salary)
+  FROM employees e2
+  WHERE e2.dept = e.dept
+);
+```
+
+Explain why the window version is often better for analytics.
+
+---
+
+## 8. Hard
+
+Design an incremental load for `source_orders(order_id, updated_at, amount)` into `target_orders`.
+
+Explain:
+
+* full refresh vs incremental
+* watermark
+* idempotency
+* late-arriving data handling
+
+---
+
+## 9. Hard
+
+A query on a huge `events` table filtered by `event_date` is slow. The current query is:
+
+```sql
+SELECT *
+FROM events
+WHERE YEAR(event_date) = 2025;
+```
+
+Explain why this hurts partition pruning and rewrite it properly.
+
+---
+
+# Final Mentor Note
+
+The biggest gap was not syntax. It was **behavioral understanding**:
+
+* when SQL stages happen
+* when joins change grain
+* when NULL breaks logic
+* when warehouse design affects SQL performance
+* when production pipelines need idempotent incremental thinking
