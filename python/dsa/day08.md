@@ -53,7 +53,7 @@ class Solution:
         return res == res[::-1]
 ```
 
-```
+```python
 # -----------------------------
 # Pythonic (clean + readable)
 # -----------------------------
@@ -67,7 +67,7 @@ class Solution:
         return new_string.lower() == new_string[::-1].lower()
 ```
 
-```
+```python
 # -----------------------------
 # Optimal (Two-pointer approach)
 # -----------------------------
