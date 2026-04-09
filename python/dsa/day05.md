@@ -48,7 +48,7 @@ class Solution:
         return result
 ```
 
-```
+```python
 class Solution:
     def largestNumber(self, nums):
         # Convert all integers to strings for concatenation comparison
