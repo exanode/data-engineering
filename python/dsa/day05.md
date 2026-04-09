@@ -47,3 +47,28 @@ class Solution:
 
         return result
 ```
+
+```
+class Solution:
+    def largestNumber(self, nums):
+        # Convert all integers to strings for concatenation comparison
+        nums = list(map(str, nums))
+        
+        # Perform insertion sort based on custom comparison
+        for i in range(1, len(nums)):
+            to_left = i - 1
+            anchor = nums[i]  # Current element to position correctly
+            
+            # Shift elements to the right if they form a smaller number
+            # when placed before 'anchor'
+            while to_left >= 0 and nums[to_left] + anchor < anchor + nums[to_left]:
+                nums[to_left + 1] = nums[to_left]
+                to_left -= 1
+            
+            # Place the anchor at its correct position
+            nums[to_left + 1] = anchor
+        
+        # Edge case: if the largest number is '0', return '0'
+        # (handles cases like [0, 0])
+        return ''.join(nums) if nums[0] != '0' else '0'
+```
